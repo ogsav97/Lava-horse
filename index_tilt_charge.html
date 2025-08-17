@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Seahorse Lava Jump — Tilt + Charge</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #051923; color: #e6f2ff; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none;
+    }
+    #gameContainer { position: relative; width: 100vw; height: 100vh; background: linear-gradient(180deg,#06283D 0%,#0B3B59 50%,#0E4B6E 100%); }
+    canvas { display:block; width:100%; height:100%; image-rendering: pixelated; }
+    #hud {
+      position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:space-between; align-items:center;
+      font-weight:800; text-shadow:0 2px 6px rgba(0,0,0,0.65); pointer-events:none; z-index:5;
+    }
+    .pillBtn { pointer-events:auto; background:rgba(0,0,0,0.35); border:1px solid rgba(255,255,255,0.25); color:#e6f2ff;
+      border-radius:999px; padding:6px 10px; font-weight:900; }
+    #overlay {
+      position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px;
+      background: radial-gradient(ellipse at center, rgba(0,0,0,0.25), rgba(0,0,0,0.55)); color:#fff; text-align:center; padding:24px; z-index:10;
+    }
+    #overlay.hidden { display:none; }
+    .title { font-size: clamp(22px, 5vw, 42px); font-weight:900; }
+    .subtitle { opacity:0.9; font-size:clamp(14px,3vw,18px); }
+    .chip { display:inline-block; padding:6px 10px; border-radius:999px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.25); font-size:12px; }
+    #chargeBarWrap {
+      position:absolute; bottom:16px; left:50%; transform:translateX(-50%); width:min(520px,80vw);
+      height:10px; border-radius:999px; background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.25); z-index:6;
+    }
+    #chargeBar { height:100%; width:0%; border-radius:999px; background: linear-gradient(90deg,#FFD166,#EF476F); box-shadow: 0 0 16px rgba(239,71,111,0.4) inset; }
+    #hint { position:absolute; bottom:34px; left:50%; transform:translateX(-50%); font-size:12px; opacity:0.75; z-index:6; }
+  </style>
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="game"></canvas>
+    <div id="hud">
+      <div id="score">Score: 0</div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button id="tiltBtn" class="pillBtn">Enable Tilt</button>
+        <button id="muteBtn" class="pillBtn" aria-label="Toggle sound">🔊</button>
+      </div>
+    </div>
+    <div id="overlay">
+      <div class="title">Seahorse Lava Jump</div>
+      <div class="subtitle">Tilt your phone to move. <span class="chip">Long‑press</span> anywhere to charge, then release to shoot lava.</div>
+      <div class="subtitle">Each shot increases your power — the more you shoot, the stronger the fireballs get.</div>
+      <div class="chip">Desktop fallback: ◀ ▶ or A/D, Space to shoot</div>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button class="pillBtn" id="startBtn">Start</button>
+        <button class="pillBtn" id="startTiltBtn">Start + Enable Tilt</button>
+      </div>
+    </div>
+    <div id="chargeBarWrap"><div id="chargeBar"></div></div>
+    <div id="hint">(Hold to charge • release to fire)</div>
+  </div>
+
+  <script>
+  (() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    let W=0,H=0;
+    function resize(){ W = canvas.clientWidth; H = canvas.clientHeight; canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); }
+    window.addEventListener('resize', resize, {passive:true}); resize();
+
+    // HUD
+    const scoreEl = document.getElementById('score');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const startTiltBtn = document.getElementById('startTiltBtn');
+    const tiltBtn = document.getElementById('tiltBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    const chargeWrap = document.getElementById('chargeBarWrap');
+    const chargeBar = document.getElementById('chargeBar');
+
+    // Audio
+    let muted=false;
+    const audioCtx = (()=>{ try { return new (window.AudioContext||window.webkitAudioContext)(); } catch { return null; } })();
+    function beep(freq=440,dur=0.07,type='sine',vol=0.03){ if(muted||!audioCtx) return; const o=audioCtx.createOscillator(); const g=audioCtx.createGain(); o.type=type;o.frequency.value=freq;g.gain.value=vol; o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+dur); }
+    muteBtn.addEventListener('click',()=>{ muted=!muted; muteBtn.textContent = muted ? '🔇' : '🔊'; if(!muted && audioCtx && audioCtx.state==='suspended') audioCtx.resume(); });
+
+    // Game state
+    const state = { running:false, gameOver:false, score:0, best:parseInt(localStorage.getItem('seahorse_best')||'0',10),
+      camY:0, gravity:0.38, bounceVel:-10.5, platforms:[], enemies:[], bullets:[], bgBubbles:[],
+      powerLevel:0, // grows with each shot (caps), makes shots stronger
+    };
+    const player = { x:0,y:0,w:26,h:28, vx:0,vy:0, facing:1, speed:3.2, alive:true, color:'#9EF01A' };
+
+    // Controls
+    const keys = { left:false, right:false, shoot:false };
+    window.addEventListener('keydown', e=>{ if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left=true;
+      if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right=true; if(e.code==='Space') keys.shoot=true; });
+    window.addEventListener('keyup', e=>{ if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left=false;
+      if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right=false; if(e.code==='Space') keys.shoot=false; });
+
+    // TILT support
+    let tiltEnabled = false;
+    let tiltGamma = 0; // left-right tilt in degrees (-90..90)
+    let tiltSensitivity = 0.07; // movement per degree
+    async function enableTilt(){
+      try {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res !== 'granted') { alert('Tilt permission denied. You can still play with keys.'); return; }
+        }
+        window.addEventListener('deviceorientation', (e) => {
+          if (e && typeof e.gamma === 'number') tiltGamma = e.gamma;
+        });
+        tiltEnabled = true;
+        tiltBtn.textContent = 'Tilt: On';
+      } catch (err) {
+        console.warn('Tilt error:', err);
+        alert('Tilt not available on this device/browser.');
+      }
+    }
+    tiltBtn.addEventListener('click', enableTilt);
+
+    // Touch long-press anywhere to charge; release to fire
+    let isCharging = false;
+    let chargeStart = 0;
+    let chargePct = 0;
+    let lastShotTime = 0;
+    const CHARGE_MAX_MS = 1200;
+    const COMBO_MAX = 12;
+    const COMBO_DECAY_EVERY_MS = 2500;
+    let lastComboTick = performance.now();
+
+    function onPressStart(e){
+      e.preventDefault();
+      if (audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+      isCharging = true;
+      chargeStart = performance.now();
+    }
+    function onPressEnd(e){
+      e.preventDefault();
+      if (!isCharging) return;
+      isCharging = false;
+      const t = performance.now() - chargeStart;
+      const pct = Math.max(0, Math.min(1, t / CHARGE_MAX_MS));
+      fireChargedShot(pct);
+      chargePct = 0; updateChargeBar();
+    }
+    window.addEventListener('touchstart', onPressStart, {passive:false});
+    window.addEventListener('touchend', onPressEnd, {passive:false});
+    window.addEventListener('mousedown', onPressStart);
+    window.addEventListener('mouseup', onPressEnd);
+
+    function updateChargeBar(){
+      chargeBar.style.width = `${Math.floor(chargePct*100)}%`;
+    }
+
+    function fireChargedShot(charge01){
+      const now = performance.now();
+      if (now - lastShotTime < 120) return;
+      lastShotTime = now;
+      // Increase persistent power with each shot
+      state.powerLevel = Math.min(COMBO_MAX, state.powerLevel + 1);
+      lastComboTick = now;
+
+      // Power calculation: base + combo + charge
+      const base = 1;
+      const comboBonus = state.powerLevel * 0.6;
+      const chargeBonus = charge01 * 3.0;
+      const power = base + comboBonus + chargeBonus; // grows with shots and charge
+
+      // Bullet properties
+      const dir = player.facing;
+      const speedX = 3.5 + power * 0.6;
+      const speedY = -6.5 - power * 0.25;
+      const radius = 5 + power * 0.8;
+
+      const bx = player.x + player.w*0.5 + dir*10;
+      const by = player.y + player.h*0.35;
+      state.bullets.push({ x:bx, y:by, vx:dir*speedX, vy:speedY, r:radius, life: 1200 + power*120, born: now, power });
+
+      // Audio feedback
+      beep(680 + power*12, 0.06, 'square', 0.04);
+    }
+
+    // World helpers
+    function rand(min,max){ return Math.random()*(max-min)+min; }
+    function rectsOverlap(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+    startBtn.addEventListener('click', () => { start(false); });
+    startTiltBtn.addEventListener('click', async () => { await enableTilt(); start(true); });
+
+    function start(withTilt){
+      overlay.classList.add('hidden');
+      state.running = true; state.gameOver=false; state.score=0; state.camY=0;
+      state.platforms.length=0; state.enemies.length=0; state.bullets.length=0; state.bgBubbles.length=0;
+      state.powerLevel = 0;
+      player.alive=true; player.x=W*0.5-player.w*0.5; player.y=H*0.6; player.vx=0; player.vy=-8;
+      generateInitialPlatforms(); spawnBackgroundBubbles();
+      lastTime = performance.now();
+      if (withTilt) tiltEnabled = true;
+    }
+
+    function generateInitialPlatforms(){
+      let y=H-20;
+      state.platforms.push(makePlatform(W/2-40, y, 80, false));
+      for(let i=0;i<30;i++){
+        y -= rand(60,110);
+        const platW = rand(60,120); const x = rand(0, W-platW);
+        const moving = Math.random() < 0.25;
+        state.platforms.push(makePlatform(x,y,platW,moving));
+        if (Math.random() < 0.1) state.enemies.push(makeEnemy(rand(x, x+platW-20), y-20));
+      }
+    }
+    function makePlatform(x,y,w,moving){ return { x,y,w,h:12, moving, dir:Math.random()<0.5?-1:1, speed:moving?rand(0.6,1.2):0 }; }
+    function makeEnemy(x,y){ return { x,y, vx:(Math.random()<0.5?-1:1)*rand(0.5,1.0), w:22,h:16, alive:true, t:0 }; }
+    function spawnBackgroundBubbles(){ for(let i=0;i<40;i++){ state.bgBubbles.push({ x:Math.random()*W, y:Math.random()*H, r:rand(1,3), vy:rand(-0.6,-0.2), alpha:rand(0.1,0.45)}); } }
+
+    // Loop
+    let lastTime = 0;
+    function loop(t){
+      if (!state.running) { requestAnimationFrame(loop); return; }
+      const dt = Math.min(32, t-lastTime); lastTime=t;
+      update(dt); draw();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    function update(dt){
+      // Tilt movement or keyboard fallback
+      if (tiltEnabled){
+        // gamma: left (-) to right (+). Limit to [-30,30] for stability
+        const g = Math.max(-30, Math.min(30, tiltGamma || 0));
+        player.vx += g * tiltSensitivity;
+        player.vx = Math.max(-4.2, Math.min(4.2, player.vx));
+        if (player.vx < -0.05) player.facing = -1;
+        if (player.vx >  0.05) player.facing =  1;
+      } else {
+        if (keys.left && !keys.right){ player.vx = -player.speed; player.facing=-1; }
+        else if (keys.right && !keys.left){ player.vx = player.speed; player.facing=1; }
+        else { player.vx *= 0.86; if (Math.abs(player.vx)<0.05) player.vx=0; }
+        if (keys.shoot){ // desktop quick tap
+          fireChargedShot(0.4);
+        }
+      }
+
+      // Charge bar animation
+      if (isCharging){
+        const t = performance.now() - chargeStart;
+        chargePct = Math.max(0, Math.min(1, t / CHARGE_MAX_MS));
+        updateChargeBar();
+      } else {
+        chargePct *= 0.9; updateChargeBar();
+      }
+
+      // Combo decay over time
+      const now = performance.now();
+      if (now - lastComboTick > COMBO_DECAY_EVERY_MS && state.powerLevel > 0){
+        state.powerLevel -= 1; lastComboTick = now;
+      }
+
+      // Physics
+      player.vy += state.gravity; player.x += player.vx; player.y += player.vy;
+      if (player.x > W) player.x = -player.w; if (player.x + player.w < 0) player.x = W;
+
+      // Platforms
+      for (const p of state.platforms){
+        if (p.moving){ p.x += p.speed * p.dir; if (p.x<0){ p.x=0; p.dir=1; } else if (p.x+p.w>W){ p.x = W-p.w; p.dir=-1; } }
+        if (player.vy>0 &&
+            player.x + player.w*0.6 > p.x &&
+            player.x + player.w*0.4 < p.x + p.w &&
+            player.y + player.h > p.y &&
+            player.y + player.h < p.y + p.h + 10){
+          player.y = p.y - player.h; player.vy = state.bounceVel; state.score += 1; beep(520,0.05,'triangle',0.03);
+        }
+      }
+
+      // Camera
+      const targetCam = Math.min(state.camY, player.y - (H*0.5));
+      state.camY += (targetCam - state.camY) * 0.07;
+
+      // Spawn more above
+      const highest = state.platforms.reduce((min,p)=>Math.min(min,p.y), Infinity);
+      while (highest - state.camY > -H){
+        const topY = state.platforms.reduce((min,p)=>Math.min(min,p.y), Infinity);
+        const gap = Math.random()<0.5 ? 70 : 100;
+        const newY = topY - gap;
+        const w = rand(60,120), x = rand(0, W-w);
+        const moving = Math.random()<0.3;
+        state.platforms.push(makePlatform(x,newY,w,moving));
+        if (Math.random()<0.12) state.enemies.push(makeEnemy(rand(x,x+w-20), newY-20));
+        break;
+      }
+      state.platforms = state.platforms.filter(p => p.y - state.camY < H + 60);
+
+      // Enemies
+      for (const e of state.enemies){
+        e.t += dt; e.x += e.vx;
+        if (e.x < 0 || e.x + e.w > W) e.vx *= -1;
+        e.y += Math.sin(e.t*0.004)*0.2;
+        if (player.alive && rectsOverlap(player,e)){ player.alive=false; gameOver(); }
+      }
+      state.enemies = state.enemies.filter(e => e.y - state.camY < H + 80 && e.alive);
+
+      // Bullets
+      for (const b of state.bullets){
+        b.x += b.vx; b.y += b.vy; b.vy += 0.12;
+        // Enemy hit
+        for (const e of state.enemies){
+          if (e.alive && b.x-b.r < e.x+e.w && b.x+b.r > e.x && b.y-b.r < e.y+e.h && b.y+b.r > e.y){
+            e.alive=false; b.life=0;
+            const bonus = Math.floor(2 + b.power * 0.8);
+            state.score += 5 + bonus;
+            beep(220,0.07,'sawtooth',0.05);
+          }
+        }
+      }
+      state.bullets = state.bullets.filter(b => (now - b.born) < b.life && b.y - state.camY < H + 60 && b.x>-40 && b.x<W+40);
+
+      // Death
+      if (player.y - state.camY > H + 60){ player.alive=false; gameOver(); }
+
+      // HUD
+      scoreEl.textContent = `Score: ${state.score}  —  Best: ${state.best}  —  Power: ${state.powerLevel}`;
+    }
+
+    function gameOver(){
+      if (state.gameOver) return;
+      state.gameOver=true; state.running=false;
+      state.best = Math.max(state.best, state.score);
+      localStorage.setItem('seahorse_best', String(state.best));
+      beep(160,0.18,'square',0.06);
+      showOverlay(true);
+    }
+
+    function showOverlay(isOver){
+      overlay.classList.remove('hidden');
+      overlay.innerHTML = `
+        <div class="title">${isOver ? 'Game Over' : 'Seahorse Lava Jump'}</div>
+        <div class="subtitle">Tilt to move. Long‑press to charge and release to shoot. Shots get stronger the more you shoot.</div>
+        <div class="chip">Score: <b>${state.score}</b> • Best: <b>${state.best}</b> • Power: <b>${state.powerLevel}</b></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="pillBtn" id="restartBtn">${isOver ? 'Play Again' : 'Start'}</button>
+          <button class="pillBtn" id="restartTiltBtn">Start + Enable Tilt</button>
+        </div>
+      `;
+      document.getElementById('restartBtn').addEventListener('click', () => start(false));
+      document.getElementById('restartTiltBtn').addEventListener('click', async () => { await enableTilt(); start(true); });
+    }
+
+    // Drawing helpers
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      drawBackground();
+      ctx.save(); ctx.translate(0, -state.camY);
+      for (const p of state.platforms) drawPlatform(p);
+      for (const e of state.enemies) if (e.alive) drawEnemy(e);
+      if (player.alive) drawSeahorse(player);
+      for (const b of state.bullets) drawBullet(b);
+      ctx.restore();
+    }
+    function drawBackground(){
+      for (let i=0;i<3;i++){
+        const x=(i+1)*W/4;
+        const grad = ctx.createLinearGradient(x,0,x+W*0.12,H);
+        grad.addColorStop(0,'rgba(255,255,255,0.04)'); grad.addColorStop(1,'rgba(255,255,255,0.0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.moveTo(x - W*0.08, 0); ctx.lineTo(x + W*0.12, 0); ctx.lineTo(x + W*0.02, H); ctx.lineTo(x - W*0.18, H); ctx.closePath(); ctx.fill();
+      }
+      // Foreground bubbles (screen space)
+      for (const bb of state.bgBubbles){
+        ctx.globalAlpha = bb.alpha; ctx.beginPath(); ctx.arc(bb.x, bb.y, bb.r, 0, Math.PI*2); ctx.fillStyle='#BDE0FE'; ctx.fill(); ctx.globalAlpha=1;
+        bb.y += bb.vy; if (bb.y < -5){ bb.y = H+5; bb.x = Math.random()*W; }
+      }
+    }
+    function drawPlatform(p){ const r=6; ctx.fillStyle='#1E6091'; roundRect(ctx,p.x,p.y,p.w,p.h,r,true,false); ctx.fillStyle='#A9D6E5'; roundRect(ctx,p.x,p.y,p.w,3,r,true,false); }
+    function drawEnemy(e){
+      const {x,y,w,h}=e; ctx.fillStyle='#FF477E'; roundRect(ctx,x,y,w,h,6,true,false);
+      ctx.fillStyle='#2b1f24'; ctx.fillRect(x+5,y+4,4,4); ctx.fillRect(x+w-9,y+4,4,4);
+      // little tentacles
+      ctx.strokeStyle='rgba(255,100,150,0.8)'; ctx.lineWidth=2;
+      for(let i=0;i<4;i++){ const tx=x+4+i*(w-8)/3; ctx.beginPath(); ctx.moveTo(tx,y+h); ctx.quadraticCurveTo(tx+4,y+h+6,tx-2,y+h+12); ctx.stroke(); }
+    }
+    function drawSeahorse(s){
+      const {x,y,w,h}=s; ctx.save(); ctx.fillStyle=s.color;
+      roundRect(ctx,x,y+4,w*0.7,h-6,10,true,false);
+      ctx.beginPath(); ctx.ellipse(x+(s.facing>0?w*0.55:w*0.45),y+8,10,8,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#C7F9CC'; const snX=x+(s.facing>0?w*0.70:w*0.30); ctx.fillRect(snX-2,y+6,10,4);
+      ctx.fillStyle='#7AE582'; ctx.beginPath(); ctx.moveTo(x+w*0.2,y+h*0.25); ctx.lineTo(x-6,y+h*0.35); ctx.lineTo(x+w*0.2,y+h*0.45); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha=0.3; ctx.fillStyle='#FFFFFF'; roundRect(ctx,x+4,y+10,w*0.4,h*0.55,8,true,false); ctx.globalAlpha=1; ctx.restore();
+    }
+    function drawBullet(b){
+      const grd = ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,b.r*2.2);
+      grd.addColorStop(0,'#FFF0'); grd.addColorStop(0.25,'#FFD166'); grd.addColorStop(0.7,'#EF476F'); grd.addColorStop(1,'#8A1C3A');
+      ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.arc(b.x,b.y,b.r*2.2,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+    }
+    function roundRect(ctx,x,y,w,h,r,fill,stroke){
+      if(typeof r==='number') r={tl:r,tr:r,br:r,bl:r};
+      ctx.beginPath();
+      ctx.moveTo(x+r.tl, y);
+      ctx.lineTo(x+w-r.tr, y);
+      ctx.quadraticCurveTo(x+w, y, x+w, y+r.tr);
+      ctx.lineTo(x+w, y+h-r.br);
+      ctx.quadraticCurveTo(x+w, y+h, x+w-r.br, y+h);
+      ctx.lineTo(x+r.bl, y+h);
+      ctx.quadraticCurveTo(x, y+h, x, y+h-r.bl);
+      ctx.lineTo(x, y+r.tl);
+      ctx.quadraticCurveTo(x, y, x+r.tl, y);
+      ctx.closePath();
+      if(fill) ctx.fill(); if(stroke) ctx.stroke();
+    }
+
+    document.addEventListener('visibilitychange', ()=>{ if(document.hidden){ state.running=false; } });
+    window.addEventListener('focus', ()=>{ if(!state.gameOver && overlay.classList.contains('hidden')){ state.running=true; lastTime=performance.now(); } });
+  })();
+  </script>
+</body>
+</html>
