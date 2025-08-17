@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Seahorse Lava Rush (Phaser)</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #041C2C; }
+    #game-root { width: 100vw; height: 100vh; overflow: hidden; }
+    .ui { position: absolute; top: 8px; left: 8px; right: 8px; display:flex; justify-content:space-between; z-index: 5; pointer-events:none; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; color: #E8F7FF; text-shadow: 0 2px 8px rgba(0,0,0,0.6); font-weight: 800; }
+    .ui .row { display:flex; gap:8px; align-items:center; }
+    .pill { pointer-events:auto; padding:6px 10px; border-radius:999px; background:rgba(0,0,0,0.35); border:1px solid rgba(255,255,255,0.25); }
+    .controls { position:absolute; bottom: env(safe-area-inset-bottom, 10px); left: 12px; right: 12px; display:flex; gap: 12px; z-index:6; }
+    .btn { flex:1; padding:16px 0; font-weight:900; font-size:18px; text-align:center; border-radius:16px; background:rgba(0,0,0,0.45); color:#E8F7FF; border:2px solid rgba(255,255,255,0.35); backdrop-filter: blur(2px); -webkit-tap-highlight-color: transparent; }
+    .btn.small { flex:0.75; min-width:88px; }
+    #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; color:#fff; background: radial-gradient(ellipse at center, rgba(0,0,0,0.25), rgba(0,0,0,0.6)); z-index:10; text-align:center; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #overlay.hidden { display:none; }
+    .title { font-size: clamp(22px, 5vw, 42px); letter-spacing:1px; }
+    .chip { display:inline-block; padding:6px 10px; border-radius:999px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.25); font-size:12px; }
+  </style>
+</head>
+<body>
+  <div id="game-root"></div>
+  <div class="ui">
+    <div class="row"><div id="score">Score: 0</div></div>
+    <div class="row">
+      <button id="pauseBtn" class="pill">Pause</button>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="btn small" id="leftBtn">◀</button>
+    <button class="btn" id="shootBtn">Shoot 🔥</button>
+    <button class="btn small" id="rightBtn">▶</button>
+  </div>
+  <div id="overlay">
+    <div class="title">Seahorse Lava Rush</div>
+    <div>Phaser-powered upgrade: parallax ocean, particles, screen shake, smooth physics.</div>
+    <div class="chip">Move: ◀ ▶ or A/D • Shoot: Space • Pause: P</div>
+    <button class="btn" id="startBtn">Start</button>
+  </div>
+
+  <!-- Phaser CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"></script>
+  <script>
+  (() => {
+    const scoreEl = document.getElementById('score');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const leftBtn = document.getElementById('leftBtn');
+    const rightBtn = document.getElementById('rightBtn');
+    const shootBtn = document.getElementById('shootBtn');
+
+    let keys = { left:false, right:false, shoot:false };
+
+    function bindBtn(btn, prop) {
+      const on = e => { e.preventDefault(); keys[prop] = true; };
+      const off = e => { e.preventDefault(); keys[prop] = false; };
+      btn.addEventListener('touchstart', on, {passive:false});
+      btn.addEventListener('touchend', off, {passive:false});
+      btn.addEventListener('touchcancel', off, {passive:false});
+      btn.addEventListener('mousedown', on);
+      window.addEventListener('mouseup', off);
+      window.addEventListener('blur', off);
+    }
+    bindBtn(leftBtn, 'left');
+    bindBtn(rightBtn, 'right');
+    bindBtn(shootBtn, 'shoot');
+
+    window.addEventListener('keydown', e=>{
+      if (e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left = true;
+      if (e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right = true;
+      if (e.code==='Space') keys.shoot = true;
+      if (e.key==='p'||e.key==='P') togglePause();
+    });
+    window.addEventListener('keyup', e=>{
+      if (e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left = false;
+      if (e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right = false;
+      if (e.code==='Space') keys.shoot = false;
+    });
+
+    let game, scene;
+
+    function startGame() {
+      overlay.classList.add('hidden');
+      if (game) { game.destroy(true); }
+      scene = new SeahorseScene();
+      game = new Phaser.Game({
+        type: Phaser.AUTO,
+        parent: 'game-root',
+        backgroundColor: '#06283D',
+        scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
+        physics: { default: 'arcade', arcade: { gravity: { y: 900 }, debug: false } },
+        scene: scene
+      });
+    }
+
+    function togglePause(){
+      if (!scene) return;
+      if (scene.scene.isPaused()) { scene.scene.resume(); pauseBtn.textContent = 'Pause'; }
+      else { scene.scene.pause(); pauseBtn.textContent = 'Resume'; }
+    }
+    pauseBtn.addEventListener('click', togglePause);
+
+    class SeahorseScene extends Phaser.Scene {
+      constructor() { super('Seahorse'); }
+
+      preload(){}
+
+      create(){
+        this.score = 0;
+        this.best = parseInt(localStorage.getItem('phaser_seahorse_best')||'0',10);
+
+        // Parallax background (simple gradient layers as graphics textures)
+        const w = this.scale.width, h = this.scale.height;
+        this.bg1 = this.add.rectangle(0,0,w,h, 0x0b3b59).setOrigin(0).setAlpha(0.9);
+        this.bg2 = this.add.rectangle(0,0,w,h, 0x0e4b6e).setOrigin(0).setAlpha(0.6);
+        this.bg3 = this.add.rectangle(0,0,w,h, 0x06283d).setOrigin(0).setAlpha(0.4);
+
+        // Particle manager for bubbles
+        this.bubbles = this.add.particles(0, 0, 'bubbles', {
+          x: { min: 0, max: () => this.scale.width },
+          y: () => this.cameras.main.scrollY + this.scale.height + 10,
+          lifespan: 4000,
+          speedY: { min: -40, max: -20 },
+          scale: { start: 0.5, end: 0 },
+          alpha: { start: 0.5, end: 0 },
+          quantity: 2,
+          frequency: 120,
+          emitZone: undefined
+        });
+        // If texture doesn't exist yet, create a circle texture
+        if (!this.textures.exists('bubbles')) {
+          const g = this.add.graphics();
+          g.fillStyle(0xBDE0FE, 1).fillCircle(4,4,4);
+          g.generateTexture('bubbles', 8, 8);
+          g.destroy();
+          this.bubbles.setTexture('bubbles');
+        }
+
+        // Platforms group (static physics bodies)
+        this.platforms = this.physics.add.staticGroup();
+        this.baseY = 100;
+        for (let i=0; i<18; i++){
+          this.spawnPlatform(this.scale.height - i*120);
+        }
+
+        // Player
+        this.player = this.physics.add.sprite(this.scale.width/2, this.scale.height-100, 'seahorse');
+        this.player.setSize(22, 26).setOffset(0,0);
+        this.player.body.setAllowGravity(true);
+        this.player.setBounce(0.2).setCollideWorldBounds(false);
+        this.player.facing = 1;
+
+        // Draw seahorse texture as a generated shape
+        if (!this.textures.exists('seahorse')) {
+          const g = this.add.graphics();
+          g.fillStyle(0x9EF01A, 1);
+          g.fillRoundedRect(0, 4, 18, 22, 8);     // body
+          g.fillStyle(0x9EF01A, 1);
+          g.fillCircle(14, 10, 8);                // head
+          g.fillStyle(0xC7F9CC, 1);
+          g.fillRect(18, 8, 8, 4);                // snout
+          g.fillStyle(0x7AE582, 1);
+          g.fillTriangle(4, 10, -4, 14, 4, 18);   // fin
+          g.generateTexture('seahorse', 28, 28);
+          g.destroy();
+          this.player.setTexture('seahorse');
+        }
+
+        // Bullets (lava) + impact particles
+        this.bullets = this.physics.add.group({ allowGravity: true });
+        this.impact = this.add.particles(0,0,'lava');
+        if (!this.textures.exists('lava')) {
+          const g = this.add.graphics();
+          const grd = g.createGradient(0,0,0,16,[{offset:0,color:0xFFD166},{offset:1,color:0xEF476F}]);
+          // Phaser Graphics doesn't have createGradient directly; emulate with two circles
+          g.fillStyle(0xEF476F,1).fillCircle(8,8,6).fillStyle(0xFFD166,1).fillCircle(8,8,3);
+          g.generateTexture('lava', 16,16); g.destroy();
+        }
+        this.impactEmitter = this.impact.createEmitter({
+          frame: null,
+          lifespan: 350, speed: { min: 50, max: 140 }, scale: { start: 0.7, end: 0 },
+          quantity: 6, gravityY: 300
+        });
+        this.impact.setTexture('lava');
+
+        // Enemies
+        this.enemies = this.physics.add.group({ allowGravity: false });
+        for (let i=0;i<6;i++) this.spawnEnemy(this.scale.height - 250 - i*350);
+
+        // Collisions
+        this.physics.add.collider(this.player, this.platforms, (player, plat) => {
+          if (player.body.velocity.y > 0) {
+            player.setVelocityY(-520);
+            this.bumpScore(1);
+          }
+        });
+        this.physics.add.overlap(this.player, this.enemies, () => this.gameOver());
+        this.physics.add.overlap(this.bullets, this.enemies, (bullet, enemy) => {
+          bullet.destroy();
+          enemy.destroy();
+          this.cameras.main.shake(120, 0.004);
+          this.impactEmitter.emitParticleAt(enemy.x, enemy.y, 10);
+          this.bumpScore(5);
+          // respawn a new enemy higher up
+          this.spawnEnemy(this.cameras.main.worldView.y - Phaser.Math.Between(400, 800));
+        });
+
+        // Camera follows upward progress
+        this.cameras.main.startFollow(this.player, false, 0.1, 0.1, 0, 200);
+        this.cameras.main.setDeadzone(this.scale.width * 0.5, this.scale.height * 0.6);
+
+        // Input timing
+        this.lastShot = 0;
+
+        // Pause overlay hint tween
+        this.tweens.add({ targets: pauseBtn, duration: 400, scale: 1.04, yoyo: true, repeat: 2 });
+      }
+
+      spawnPlatform(y){
+        const w = Phaser.Math.Between(80, 150);
+        const x = Phaser.Math.Between(20, Math.max(40, this.scale.width - w - 20));
+        const rect = this.add.rectangle(x + w/2, y, w, 14, 0x1E6091).setOrigin(0.5);
+        const top = this.add.rectangle(x + w/2, y-5, w, 3, 0xA9D6E5).setOrigin(0.5);
+        this.platforms.add(rect);
+        rect.link = top;
+      }
+
+      spawnEnemy(y){
+        const x = Phaser.Math.Between(32, this.scale.width-32);
+        const e = this.enemies.create(x, y, null);
+        e.setSize(28,18);
+        e.body.allowGravity = false;
+        e.vx = Phaser.Math.Between(50,110) * (Math.random()<0.5?-1:1);
+        e.update = function(time, delta){
+          this.x += this.vx * delta/1000;
+          if (this.x < 16 || this.x > scene.scale.width-16) this.vx *= -1;
+        };
+        // draw simple jelly
+        if (!this.textures.exists('jelly')) {
+          const g = this.add.graphics();
+          g.fillStyle(0xFF477E,1).fillRoundedRect(0,0,28,18,6);
+          g.fillStyle(0x2b1f24,1).fillRect(5,4,4,4).fillRect(28-9,4,4,4);
+          g.generateTexture('jelly', 28,18); g.destroy();
+        }
+        e.setTexture('jelly');
+        return e;
+      }
+
+      update(time, delta){
+        // Parallax
+        this.bg1.y = this.cameras.main.scrollY * 0.2;
+        this.bg2.y = this.cameras.main.scrollY * 0.4;
+        this.bg3.y = this.cameras.main.scrollY * 0.6;
+
+        // Player control
+        const speed = 180;
+        if (keys.left && !keys.right){ this.player.setVelocityX(-speed); this.player.facing = -1; }
+        else if (keys.right && !keys.left){ this.player.setVelocityX(speed); this.player.facing = 1; }
+        else { this.player.setVelocityX(0); }
+
+        if (keys.shoot) this.tryShoot(time);
+
+        // Wrap horizontally
+        const w = this.scale.width;
+        if (this.player.x > w+16) this.player.x = -16;
+        if (this.player.x < -16) this.player.x = w+16;
+
+        // Recycle platforms below screen & spawn above
+        const camY = this.cameras.main.scrollY;
+        this.platforms.children.iterate(plat => {
+          if (plat.y > camY + this.scale.height + 60) {
+            plat.y = camY - Phaser.Math.Between(120, 180);
+            plat.x = Phaser.Math.Between(60, this.scale.width - 60);
+            if (plat.link) plat.link.y = plat.y - 5; // top highlight
+            plat.refreshBody && plat.refreshBody();
+          }
+        });
+
+        // Fall death
+        if (this.player.y > camY + this.scale.height + 100) this.gameOver();
+      }
+
+      tryShoot(time){
+        if (time - this.lastShot < 200) return;
+        this.lastShot = time;
+        const b = this.bullets.create(this.player.x + this.player.facing*10, this.player.y-4, 'lava');
+        b.setCircle(6).setBounce(0.4).setVelocity(this.player.facing*260, -400).setDrag(15,10);
+        this.time.delayedCall(1500, () => b.destroy());
+      }
+
+      bumpScore(n){
+        this.score += n;
+        scoreEl.textContent = `Score: ${this.score}  —  Best: ${Math.max(this.best, this.score)}`;
+      }
+
+      gameOver(){
+        this.best = Math.max(this.best, this.score);
+        localStorage.setItem('phaser_seahorse_best', String(this.best));
+        this.scene.restart(); // quick restart for demo
+        overlay.classList.remove('hidden');
+        overlay.querySelector('.title').textContent = 'Game Over';
+        overlay.querySelector('.chip').textContent = `Score: ${this.score} • Best: ${this.best}`;
+      }
+    }
+
+    startBtn.addEventListener('click', startGame);
+  })();
+  </script>
+</body>
+</html>
